@@ -20,7 +20,7 @@ export AWS_REGION
 export AWS_DEFAULT_REGION := $(AWS_REGION)
 
 # arm64 (Graviton, cheaper; native on Apple Silicon) or amd64
-ARCH        ?= arm64
+ARCH        ?= $(if $(filter arm64 aarch64,$(shell uname -m)),arm64,amd64)
 # Lambda only picks up a new image when its URI changes, so uncommitted builds get a unique tag.
 ifndef TAG
 TAG         := $(shell git describe --always --dirty=-dirty-$$(date +%Y%m%d%H%M%S) 2>/dev/null || date +%Y%m%d%H%M%S)
@@ -250,10 +250,22 @@ aws-frontend-publish: ## Build the SPA with VITE_API_URL=<function URL>, upload 
 	[ -n "$$bucket" ] || { echo "Frontend stack not found: run \`make aws-frontend-stack\` first"; exit 1; }; \
 	[ -n "$(COGNITO_POOL_ID)" ] || { echo "Cognito not deployed: run \`make aws-cognito-deploy\` first"; exit 1; }; \
 	echo "Building frontend with VITE_API_URL=$$api" && \
-	(cd front && npm ci --no-audit --no-fund && VITE_API_URL="$$api" \
-	  VITE_COGNITO_REGION=$(AWS_REGION) VITE_COGNITO_USER_POOL_ID=$(COGNITO_POOL_ID) \
-	  VITE_COGNITO_CLIENT_ID=$(COGNITO_CLIENT) VITE_COGNITO_DOMAIN=$(call cognito_output,HostedUiDomain) \
-	  VITE_COGNITO_GOOGLE=$(call cognito_output,GoogleEnabled) npm run build) && \
+	if command -v npm >/dev/null 2>&1; then \
+	  (cd front && npm ci --no-audit --no-fund && VITE_API_URL="$$api" \
+	    VITE_COGNITO_REGION=$(AWS_REGION) VITE_COGNITO_USER_POOL_ID=$(COGNITO_POOL_ID) \
+	    VITE_COGNITO_CLIENT_ID=$(COGNITO_CLIENT) VITE_COGNITO_DOMAIN=$(call cognito_output,HostedUiDomain) \
+	    VITE_COGNITO_GOOGLE=$(call cognito_output,GoogleEnabled) npm run build); \
+	else \
+	  echo "npm not found on host, building inside Docker (node:24-alpine)..." && \
+	  docker run --rm -v "$$(pwd)/front:/app" -w /app \
+	    -e VITE_API_URL="$$api" \
+	    -e VITE_COGNITO_REGION=$(AWS_REGION) \
+	    -e VITE_COGNITO_USER_POOL_ID=$(COGNITO_POOL_ID) \
+	    -e VITE_COGNITO_CLIENT_ID=$(COGNITO_CLIENT) \
+	    -e VITE_COGNITO_DOMAIN=$(call cognito_output,HostedUiDomain) \
+	    -e VITE_COGNITO_GOOGLE=$(call cognito_output,GoogleEnabled) \
+	    node:24-alpine sh -c "npm ci --no-audit --no-fund && npm run build"; \
+	fi && \
 	aws s3 sync front/dist "s3://$$bucket" --delete --exclude index.html \
 	  --cache-control "public,max-age=31536000,immutable" && \
 	aws s3 cp front/dist/index.html "s3://$$bucket/index.html" --cache-control "no-cache" && \

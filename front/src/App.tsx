@@ -19,6 +19,14 @@ export default function App() {
         }
       />
       <Route
+        path="/login"
+        element={
+          <RedirectIfSignedIn>
+            <LoginPage />
+          </RedirectIfSignedIn>
+        }
+      />
+      <Route
         path="/signup"
         element={
           <RedirectIfSignedIn>

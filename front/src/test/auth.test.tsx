@@ -19,6 +19,12 @@ describe("Sign in", () => {
     expect(screen.getByRole("button", { name: "Continue with Google" })).toBeInTheDocument()
   })
 
+  it("renders on /login", () => {
+    renderAt("/login")
+    expect(screen.getByRole("heading", { name: "Sign in" })).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Continue with Google" })).toBeInTheDocument()
+  })
+
   it("validates email and password", async () => {
     renderAt("/")
     await userEvent.type(screen.getByLabelText("Email"), "not-an-email")
