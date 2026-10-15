@@ -32,6 +32,9 @@ BACKEND_FUNCTION  := $(PROJECT)-backend
 BACKEND_PARAMS    := infra/backend.params.env
 FRONTEND_STACK    := $(PROJECT)-frontend
 COGNITO_STACK     := $(PROJECT)-cognito
+REPORTS_STACK     := $(PROJECT)-reports
+REPORTS_BUILDER   := $(PROJECT)-report-builder
+REPORTS_MAILER    := $(PROJECT)-report-mailer
 # Every resource gets this tag (in the templates and as a stack tag).
 STACK_TAGS        := PROJECT_NAME=$(PROJECT)
 
@@ -61,6 +64,9 @@ BACKEND_PARAMS_ARGS = $(shell [ -f $(BACKEND_PARAMS) ] && grep -v -e '^[[:space:
 backend_output  = $(call stack_output,$(BACKEND_STACK),$(1))
 frontend_output = $(call stack_output,$(FRONTEND_STACK),$(1))
 cognito_output  = $(call stack_output,$(COGNITO_STACK),$(1))
+reports_output  = $(call stack_output,$(REPORTS_STACK),$(1))
+RECIPIENT_EMAIL ?= reaperkryt@gmail.com
+SENDER_EMAIL    ?= $(RECIPIENT_EMAIL)
 API_URL          = $(call backend_output,ApiUrl)
 FRONTEND_ORIGINS = $(call frontend_output,SiteOrigins)
 CORS_ORIGINS_AWS = $(CORS_LOCAL)$(if $(FRONTEND_ORIGINS),$(COMMA)$(FRONTEND_ORIGINS))
@@ -362,6 +368,68 @@ aws-cognito-destroy: aws-check ## Delete the Cognito stack — ALL user accounts
 	@read -p "Delete stack $(COGNITO_STACK) and every user account in it? [y/N] " ok && [ "$$ok" = y ]
 	aws cloudformation delete-stack --stack-name $(COGNITO_STACK)
 	aws cloudformation wait stack-delete-complete --stack-name $(COGNITO_STACK)
+
+##@ AWS weekly reports (EventBridge Scheduler, SQS, S3, SES)
+
+.PHONY: aws-reports-deploy
+aws-reports-deploy: aws-check aws-backend-push ## Deploy weekly reports stack (SQS, Builder Lambda, Mailer Lambda, S3, EventBridge)
+	$(call clear_failed_stack,$(REPORTS_STACK))
+	@test -n "$(call backend_output,FunctionName)" || { echo "Backend not deployed: run \`make aws-backend-deploy\` first"; exit 1; }
+	@vpc_id=$$(aws ec2 describe-vpcs --filters "Name=tag:PROJECT_NAME,Values=$(PROJECT)" --query "Vpcs[0].VpcId" --output text); \
+	rt_id=$$(aws ec2 describe-route-tables --filters "Name=vpc-id,Values=$$vpc_id" --query "RouteTables[0].RouteTableId" --output text); \
+	subnets=$$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$$vpc_id" --query "join(',', Subnets[].SubnetId)" --output text); \
+	sg_id=$$(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=$$vpc_id" "Name=tag:Name,Values=*backend" --query "SecurityGroups[0].GroupId" --output text); \
+	aws cloudformation deploy --stack-name $(REPORTS_STACK) --template-file infra/reports.yaml \
+	  --capabilities CAPABILITY_IAM --no-fail-on-empty-changeset --tags $(STACK_TAGS) \
+	  --parameter-overrides ProjectName=$(PROJECT) ImageUri=$(ECR_URI):$(TAG) \
+	    Architecture=$(LAMBDA_ARCH) \
+	    VpcId=$$vpc_id \
+	    RouteTableId=$$rt_id \
+	    SubnetIds=$$subnets \
+	    SecurityGroupId=$$sg_id \
+	    DbHost=$(call backend_output,DbEndpoint) \
+	    DbSecretArn=$(call backend_output,DbSecretArn) \
+	    SenderEmail=$(SENDER_EMAIL) \
+	    RecipientEmail=$(RECIPIENT_EMAIL)
+	@echo
+	@echo "Reports bucket:    $(call reports_output,ReportsBucketName)"
+	@echo "Report queue:      $(call reports_output,ReportRequestsQueueUrl)"
+	@echo "Builder function:  $(call reports_output,ReportBuilderFunctionName)"
+	@echo "Mailer function:   $(call reports_output,ReportMailerFunctionName)"
+
+.PHONY: aws-reports-outputs
+aws-reports-outputs: aws-check ## Show weekly reports stack outputs
+	@aws cloudformation describe-stacks --stack-name $(REPORTS_STACK) \
+	  --query "Stacks[0].Outputs[].[OutputKey, OutputValue]" --output table
+
+.PHONY: report-now
+report-now: aws-check ## Request an on-demand report via SQS (e.g. make report-now WEEK=2026-W39)
+	@queue="$(call reports_output,ReportRequestsQueueUrl)"; \
+	[ -n "$$queue" ] || { echo "Reports stack not found: run \`make aws-reports-deploy\` first"; exit 1; }; \
+	payload='{"week": $(if $(WEEK),"$(WEEK)",null), "source": "sqs"}'; \
+	echo "Sending message to SQS queue ($$queue): $$payload"; \
+	aws sqs send-message --queue-url "$$queue" --message-body "$$payload"
+
+.PHONY: aws-reports-ls
+aws-reports-ls: aws-check ## List all reports stored in S3
+	@bucket="$(call reports_output,ReportsBucketName)"; \
+	[ -n "$$bucket" ] || { echo "Reports bucket not found: run \`make aws-reports-deploy\` first"; exit 1; }; \
+	aws s3 ls "s3://$$bucket/reports/" --recursive
+
+.PHONY: aws-reports-logs-builder
+aws-reports-logs-builder: aws-check ## Tail CloudWatch logs for report-builder Lambda
+	aws logs tail /aws/lambda/$(REPORTS_BUILDER) --since 30m
+
+.PHONY: aws-reports-logs-mailer
+aws-reports-logs-mailer: aws-check ## Tail CloudWatch logs for report-mailer Lambda
+	aws logs tail /aws/lambda/$(REPORTS_MAILER) --since 30m
+
+.PHONY: aws-reports-destroy
+aws-reports-destroy: aws-check ## Empty bucket and delete reports stack
+	@read -p "Delete stack $(REPORTS_STACK) in $(AWS_REGION)? [y/N] " ok && [ "$$ok" = y ]
+	@bucket="$(call reports_output,ReportsBucketName)"; [ -z "$$bucket" ] || aws s3 rm "s3://$$bucket" --recursive --quiet
+	aws cloudformation delete-stack --stack-name $(REPORTS_STACK)
+	aws cloudformation wait stack-delete-complete --stack-name $(REPORTS_STACK)
 
 ##@ AWS (all parts)
 
