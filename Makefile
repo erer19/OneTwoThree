@@ -418,11 +418,11 @@ aws-reports-ls: aws-check ## List all reports stored in S3
 
 .PHONY: aws-reports-logs-builder
 aws-reports-logs-builder: aws-check ## Tail CloudWatch logs for report-builder Lambda
-	aws logs tail /aws/lambda/$(REPORTS_BUILDER) --since 30m
+	aws logs tail /aws/lambda/$(REPORTS_BUILDER) --since $(or $(SINCE),12h)
 
 .PHONY: aws-reports-logs-mailer
 aws-reports-logs-mailer: aws-check ## Tail CloudWatch logs for report-mailer Lambda
-	aws logs tail /aws/lambda/$(REPORTS_MAILER) --since 30m
+	aws logs tail /aws/lambda/$(REPORTS_MAILER) --since $(or $(SINCE),12h)
 
 .PHONY: aws-reports-destroy
 aws-reports-destroy: aws-check ## Empty bucket and delete reports stack
